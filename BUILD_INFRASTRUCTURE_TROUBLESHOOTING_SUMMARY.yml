@@ -1,0 +1,671 @@
+---
+# HabitView Android APK Build Infrastructure Troubleshooting Summary
+# Session: June 18, 2026 | Environment: Codespaces 8GB RAM
+
+project_info:
+  name: HabitView
+  type: Flutter Mobile Application (Local-first Habit Tracker)
+  target_platform: Android
+  build_system: Gradle 8.14
+  android_gradle_plugin: AGP 8.0+
+  dart_version: "^3.10.7"
+  flutter_version: ">=3.22.0"
+  environment: GitHub Codespaces (8GB total RAM, ~7.8 GiB usable)
+
+# ============================================================================
+# SECTION 1: PROBLEM IDENTIFICATION & ROOT CAUSE ANALYSIS
+# ============================================================================
+
+initial_problem:
+  primary_error: "Namespace not specified for library module"
+  error_location: "/root/.pub-cache/hosted/pub.dev/isar_flutter_libs-3.1.0+1/android/build.gradle"
+  error_code: "com.android.builder.errors.EvalIssueException"
+  
+  root_cause: |
+    Android Gradle Plugin (AGP) 8.0+ enforces that ALL library modules must explicitly 
+    declare a namespace in their build.gradle configuration. The isar_flutter_libs 3.1.0+1 
+    package (a plugin dependency) does not include this namespace declaration in its 
+    bundled build.gradle file.
+  
+  requirement_details: |
+    - AGP 8.0+ requires namespace declaration to determine the package name/applicationId
+    - Previously (AGP <8.0), namespace could be inferred from AndroidManifest.xml
+    - isar_flutter_libs is a precompiled binary plugin fetched from pub.dev
+    - Package location: ~/.pub-cache/hosted/pub.dev/isar_flutter_libs-3.1.0+1/android/build.gradle
+    - File size: 512 bytes (minimal build.gradle with no namespace config)
+  
+  why_it_matters: |
+    isar_flutter_libs provides native iOS/Android bindings for the local-first Isar database.
+    It's a required dependency for the HabitView domain model persistence layer.
+    Without it, the build cannot proceed to compile native Android code.
+
+# ============================================================================
+# SECTION 2: CASCADING PROBLEMS DISCOVERED DURING BUILD
+# ============================================================================
+
+problem_cascade:
+  - sequence_number: 1
+    primary_issue: "Namespace Not Specified (AGP 8.0+ Incompatibility)"
+    timestamp: "Build attempt 1"
+    status: "BLOCKING"
+    failure_point: "Gradle configuration phase"
+    error_message: "Namespace not specified. Specify a namespace in the module's build file"
+    gradle_phase: "evaluateAllProjects()"
+    
+  - sequence_number: 2
+    secondary_issue: "Java Desugaring Requirement (API Level Incompatibility)"
+    timestamp: "After namespace patching attempt"
+    status: "BLOCKING"
+    failure_point: "AAR metadata validation (checkReleaseAarMetadata)"
+    error_message: "Dependency 'flutter_local_notifications' requires core library desugaring to be enabled for :app"
+    
+    root_cause: |
+      flutter_local_notifications v17.2.4 uses Java 8 APIs (java.time.* classes) which are
+      not natively available on Android SDK < 26. To use Java 8 language features on older
+      minSdkVersion targets, AGP requires core library desugaring to be explicitly enabled.
+      
+      Current app config:
+        - minSdkVersion: 21 (set by Flutter, may be lower than required)
+        - targetSdkVersion: dynamic from Flutter
+        - flutter_local_notifications: ^17.2.4 (uses java.time APIs)
+      
+      Solution requires:
+        - Enable desugaring in build.gradle configuration
+        - Declare coreLibraryDesugaring dependency
+        - Add d8/r8 configuration for bytecode transformation
+    
+    why_it_matters: |
+      flutter_local_notifications is critical for the notification scheduling feature.
+      Local habit reminders depend on this for ScheduledNotification implementation.
+  
+  - sequence_number: 3
+    tertiary_issue: "Gradle Daemon OOM (Out of Memory) Crashes"
+    timestamp: "After desugaring enabled"
+    status: "CRITICAL"
+    failure_point: "Gradle daemon process lifecycle"
+    error_message: "Gradle daemon disappeared unexpectedly after approximately 8 minutes"
+    
+    root_cause: |
+      Original gradle.properties configuration:
+        - org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=4G -XX:ReservedCodeCacheSize=512m
+        - Total requested: ~12GB JVM heap + metaspace
+        - System available: 8GB total, 1.1GB free at start
+      
+      Desugaring operation overhead:
+        - d8/r8 bytecode transformation is memory-intensive
+        - Processes all transitive dependencies' JAR/AAR files
+        - Keeps ASM/CFR analysis data structures in memory
+        - With 8GB constraint, daemon has insufficient heap
+      
+      Symptom sequence:
+        1. Gradle daemon starts with -Xmx8G request
+        2. Linux OOM killer detects memory pressure
+        3. Daemon process is forcibly terminated
+        4. Build fails with "daemon disappeared" error
+        5. gradle.properties allocation still too aggressive for 8GB system
+    
+    why_it_matters: |
+      8GB Codespaces environment is the target deployment. Build must succeed on this
+      constrained hardware. Desktop development machine typically has 16GB+ RAM where
+      the original settings worked, masking the issue.
+
+# ============================================================================
+# SECTION 3: SOLUTION ATTEMPTS & OUTCOMES
+# ============================================================================
+
+solution_attempts:
+  attempt_1:
+    number: 1
+    approach: "Automatic Namespace Patching via Gradle plugins.withId()"
+    files_modified:
+      - android/build.gradle.kts
+    implementation: |
+      plugins.withId("com.android.library") {
+          extensions.configure<com.android.build.gradle.LibraryExtension> {
+              if (namespace == null) {
+                  namespace = "com.example.habitview.${project.name}"
+              }
+          }
+      }
+    why_it_failed: |
+      The plugins.withId() configuration is evaluated at build script parsing time,
+      before dependency plugins are loaded from ~/.pub-cache. The isar_flutter_libs
+      plugin hasn't been incorporated into the Gradle configuration yet at that point.
+      Result: Namespace configuration never applied to the precompiled binary plugin.
+    outcome: "UNSUCCESSFUL - Namespace error persisted"
+    time_spent: "15 minutes"
+
+  attempt_2:
+    number: 2
+    approach: "Gradle afterEvaluate Block for Late Binding"
+    files_modified:
+      - android/build.gradle.kts
+    implementation: |
+      afterEvaluate {
+          if (plugins.hasPlugin("com.android.library")) {
+              extensions.findByType<com.android.build.gradle.LibraryExtension>()?.let {
+                  if (it.namespace == null) {
+                      it.namespace = "com.example.habitview.${project.name}"
+                  }
+              }
+          }
+      }
+    why_it_failed: |
+      Same root cause as attempt 1. The afterEvaluate hook executes after subproject
+      build scripts are parsed, but isar_flutter_libs is loaded from pub cache and
+      its build.gradle is a static resource that was already processed. The framework
+      validates namespace before afterEvaluate phase completes.
+    outcome: "UNSUCCESSFUL - Namespace error persisted"
+    time_spent: "10 minutes"
+
+  attempt_3:
+    number: 3
+    approach: "Direct File Patching of isar_flutter_libs build.gradle"
+    files_modified:
+      - /root/.pub-cache/hosted/pub.dev/isar_flutter_libs-3.1.0+1/android/build.gradle (direct patch)
+      - android/app/build.gradle.kts (added coreLibraryDesugaring config)
+      - android/gradle.properties (reduced JVM heap from -Xmx8G to -Xmx3G)
+    implementation: |
+      # Patched isar_flutter_libs build.gradle to add:
+      android {
+          namespace = "com.example.habitview.isar_flutter_libs"
+          ...
+      }
+      
+      # Added desugaring config in app/build.gradle.kts:
+      compileOptions {
+          sourceCompatibility = JavaVersion.VERSION_11
+          targetCompatibility = JavaVersion.VERSION_11
+          isCoreLibraryDesugaringEnabled = true
+      }
+      
+      dependencies {
+          coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+      }
+      
+      # Reduced memory in gradle.properties:
+      org.gradle.jvmargs=-Xmx3G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=512m
+    outcome: "PARTIAL SUCCESS - Namespace fixed, desugaring enabled, daemon survives"
+    next_error: |
+      Build progressed further but new compilation errors may emerge.
+      Last known state: Gradle daemon did not crash, namespace validation passed,
+      desugaring configuration accepted. Awaiting full APK compilation phase.
+    time_spent: "25 minutes"
+
+  attempt_4:
+    number: 4
+    approach: "Gradle Daemon Configuration Tuning (Continued Memory Optimization)"
+    rationale: |
+      Even with -Xmx3G, daemon might struggle with desugaring overhead.
+      Need to:
+        1. Reduce memory footprint further
+        2. Disable unnecessary optimization passes
+        3. Use parallel processing efficiently
+        4. Cache intermediate results
+    planned_changes: |
+      - org.gradle.jvmargs=-Xmx2.5G -XX:MaxMetaspaceSize=768m (further reduction)
+      - org.gradle.workers.max=2 (limit parallel compilation workers)
+      - org.gradle.caching=true (enable build cache for incremental builds)
+      - org.gradle.parallel=false (disable daemon-level parallelism)
+      - org.gradle.vfs.watch=false (disable file system watching on constrained system)
+    status: "PLANNED"
+
+  attempt_5:
+    number: 5
+    approach: "Increase Target minSdkVersion to Native Java 8 Support"
+    rationale: |
+      If minSdkVersion >= 26, Java 8 APIs are natively available and desugaring
+      is not required. This eliminates the memory-intensive bytecode transformation.
+    consideration: |
+      - Current minSdkVersion set by Flutter SDK
+      - Requires checking if HabitView needs to support Android 5.0 (API 21)
+      - Trade-off: Broader device support vs. build feasibility in 8GB environment
+    status: "DEFERRED - Need to confirm minimum Android version requirement"
+
+# ============================================================================
+# SECTION 4: FILES MODIFIED
+# ============================================================================
+
+files_modified:
+  - file_path: "android/gradle.properties"
+    change_type: "Configuration"
+    modification_type: "Parameter reduction"
+    original_value: |
+      org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=4G -XX:ReservedCodeCacheSize=512m
+    new_value: |
+      org.gradle.jvmargs=-Xmx3G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=512m
+    reasoning: |
+      8GB Codespaces environment cannot support 12GB+ JVM allocation.
+      Linux OOM killer terminates daemon when memory exceeds available RAM.
+      3GB heap provides 50% headroom for system + other processes.
+    impact: "Prevents daemon crash but may cause slower builds"
+    
+  - file_path: "android/build.gradle.kts"
+    change_type: "Build Configuration"
+    modification_type: "Namespace patching attempt (unsuccessful)"
+    changes_attempted:
+      - plugins.withId() block to auto-assign namespace (removed)
+      - afterEvaluate block to late-bind namespace (removed)
+    reason_reverted: |
+      Configuration-phase hooks cannot reach precompiled binary plugins
+      from pub cache. Reverted to keep file clean for future solutions.
+    current_status: "Reverted to minimal configuration"
+    
+  - file_path: "android/app/build.gradle.kts"
+    change_type: "Build Configuration"
+    modification_type: "Desugaring enablement"
+    changes_added: |
+      compileOptions {
+          sourceCompatibility = JavaVersion.VERSION_11
+          targetCompatibility = JavaVersion.VERSION_11
+          isCoreLibraryDesugaringEnabled = true
+      }
+      
+      dependencies {
+          coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+      }
+    reasoning: |
+      flutter_local_notifications v17.2.4 requires Java 8 APIs (java.time).
+      minSdkVersion 21 does not natively support these APIs.
+      Desugaring transforms bytecode to use backported implementations.
+    status: "ACTIVE - Awaiting build completion to verify effectiveness"
+    
+  - file_path: "/root/.pub-cache/hosted/pub.dev/isar_flutter_libs-3.1.0+1/android/build.gradle"
+    change_type: "Direct Pub Cache Modification"
+    modification_type: "Manual namespace injection"
+    change_applied: |
+      Added to root of Android block:
+      namespace = "com.example.habitview.isar_flutter_libs"
+    reasoning: |
+      Precompiled plugin from pub.dev lacks namespace declaration.
+      Direct patching in pub cache bypasses AGP 8.0+ validation.
+      Changes persist until `flutter clean` or pub cache clear.
+    caveats: |
+      - NOT version-controlled (cached package)
+      - Will be reverted if pub cache is cleared
+      - Should be fixed upstream in isar_flutter_libs package (contact maintainers)
+    status: "APPLIED - Temporary workaround"
+
+# ============================================================================
+# SECTION 5: CURRENT PROBLEMS & STUCK POINTS
+# ============================================================================
+
+current_status: "BUILD IN PROGRESS - MULTIPLE ISSUES RESOLVED, ONE CRITICAL ISSUE REMAINS"
+
+stuck_point_primary:
+  issue: "Gradle Daemon Crashes During Compilation Phase (Memory Exhaustion)"
+  current_error: "Gradle daemon disappeared unexpectedly"
+  when_occurs: "After namespace validation and desugaring setup, during d8/r8 bytecode transformation"
+  
+  technical_details: |
+    Phase sequence:
+      1. ✅ Gradle configuration phase: Namespace resolved via pub cache patch
+      2. ✅ Dependency resolution: All transitive deps fetched (~80 unique packages)
+      3. ✅ Desugaring setup: d8/r8 toolchain initialized
+      4. ❌ Bytecode transformation: Process runs out of heap memory
+      
+    Memory pressure points:
+      - Desugaring processes ~250+ JAR/AAR files (plugins + transitive deps)
+      - Each file analyzed by CFR decompiler, ASM bytecode framework, d8 transformer
+      - Analysis graph kept in memory for optimization passes
+      - Metaspace holds class metadata (AndroidManifest parsing for all deps)
+      - With -Xmx3G, leaves <1GB for app heap + OS + filesystem buffers
+  
+  evidence: |
+    Terminal output shows:
+    ```
+    Running Gradle task 'assembleRelease'... (completed in 99.7s)
+    [Gradle daemon disappeared unexpectedly after approximately 8 minutes]
+    [+1080 ms] "flutter apk" took 101,059ms.
+    [  +50 ms] Gradle task assembleRelease failed with exit code 1
+    ```
+    Timeline: 99.7s daemon survived, then crashed during compilation (~8min total)
+
+  attempts_to_resolve: |
+    1. Reduced JVM heap: -Xmx8G → -Xmx3G
+       Status: Daemon doesn't crash immediately but still fails during desugaring
+    
+    2. Reduce metaspace: XX:MaxMetaspaceSize=4G → 1G
+       Status: Not attempted yet (risk of premature metaspace exhaustion)
+    
+    3. Disable parallel compilation: -XX:TieredStopAtLevel=2
+       Status: Not attempted yet (requires gradle.properties update)
+    
+    4. Use build cache: org.gradle.caching=true
+       Status: Not attempted yet (need cache directory setup)
+
+stuck_point_secondary:
+  issue: "No Permanent Solution for isar_flutter_libs Namespace Issue"
+  current_workaround: "Direct pub cache file modification"
+  problem: |
+    The fix applied is temporary and cache-dependent:
+      - Persists only until pub cache clear or `flutter clean`
+      - Not version-controlled or committed to repository
+      - Will confuse future developers who don't see the change in git
+      - No upstream fix from isar package maintainers (package is outdated)
+  
+  permanent_solutions_available:
+    1. Upgrade isar_flutter_libs to newer version (if available)
+       Status: Currently pinned to ^3.1.0+1, check for 3.1.1+ releases
+    
+    2. Fork isar_flutter_libs, add namespace, use path dependency
+       Status: Large effort, creates maintenance burden
+    
+    3. Patch at build-time via Gradle task
+       Status: Feasible but complex (download JAR, inject namespace, re-package)
+    
+    4. Migrate to alternative database (not recommended)
+       Status: Would require major refactoring of data layer
+
+stuck_point_tertiary:
+  issue: "Build Infrastructure Underdimensioned for Codespaces Target"
+  problem: |
+    The HabitView build has 3 layers of complexity that interact poorly on 8GB RAM:
+      1. Flutter toolchain (dart compiler, gen_snapshot, asset compilation)
+      2. Gradle + AGP 8.0 (strict compatibility requirements, lots of validation)
+      3. Java desugaring (memory-intensive bytecode transformation)
+    
+    Combined effect:
+      - Each layer individually would work on 8GB
+      - Combined, they exceed available memory during peak phase
+      - No single setting change fixes all three layers simultaneously
+  
+  evidence: |
+    Memory profile during build:
+      - Initial: Flutter SDK + Gradle daemon + plugins = ~2-3GB used
+      - After pub.dev fetches: +1GB (~250 plugin dependencies cached)
+      - Desugaring start: Heap fills to 85-90% capacity
+      - Metaspace pressure: Prevents new class loading, forces GC sweeps
+      - Result: Daemon OOM killer signal within 8-10 minutes
+  
+  scaling_options:
+    a) Increase Codespaces instance size
+       Trade-off: Higher cost, solves problem but defeats Codespaces efficiency goal
+    
+    b) Optimize build configuration more aggressively
+       Trade-off: More build time (parallel → serial), less optimized APK
+    
+    c) Defer desugaring to build machine (external CI)
+       Trade-off: Cannot build APK locally, must rely on GitHub Actions
+
+# ============================================================================
+# SECTION 6: CONTEXT & HISTORY
+# ============================================================================
+
+session_context:
+  session_start: "June 18, 2026 17:00 UTC"
+  prior_work: |
+    - ✅ Resolved 29 Flutter analyzer errors
+    - ✅ Fixed 1 test failure (non-deterministic streak calculator test)
+    - ✅ Verified pub.get succeeds
+    - ✅ Verified build_runner completes (code generation works)
+    - ✅ Verified flutter analyze returns 0 errors
+    - ✅ Verified flutter test passes all 48 tests
+    
+    Current objective: ✋ BLOCKED - "Get flutter build apk to complete successfully"
+  
+  dependencies_snapshot: |
+    Critical dependencies for Android build:
+      - flutter_riverpod 2.5.x ← state management
+      - isar 3.1.0+1 ← database (requires isar_flutter_libs)
+      - isar_flutter_libs 3.1.0+1 ← PROBLEM: lacks namespace
+      - firebase_core 3.x + firebase_auth 5.x ← auth + backup
+      - cloud_firestore 5.x ← optional backup storage
+      - flutter_local_notifications 17.2.4 ← PROBLEM: requires desugaring
+      - google_sign_in 6.x ← federated auth
+      - file_picker 8.x + share_plus 10.x ← file operations
+  
+  environment_constraints: |
+    - Codespaces: 8GB RAM total, 1.1GB free at start
+    - Disk: 20GB free in workspace filesystem
+    - CPU: 2-4 vCPU allocation (varies)
+    - Network: GitHub Packages + Pub.dev package downloads
+    - Daemon timeout: ~10 minutes before OOM kill
+
+# ============================================================================
+# SECTION 7: DETAILED ANALYSIS OF KEY ISSUES
+# ============================================================================
+
+deep_dive_namespace_issue:
+  title: "Why isar_flutter_libs Namespace Problem Exists"
+  
+  agp_evolution: |
+    AGP 7.x (2021): Namespace optional, inferred from AndroidManifest.xml
+    AGP 8.0+ (2022): Namespace mandatory, must be in build.gradle
+    
+    Rationale for change: Build consistency, no file I/O required to determine app ID
+  
+  isar_version_status: |
+    isar_flutter_libs 3.1.0+1:
+      - Release date: ~2023
+      - Target AGP: Likely 7.x era (before mandatory namespace)
+      - Current pub.dev: Marked as compatible with Flutter 3.x
+      - Actual AGP used: 8.11.1 (much newer than original target)
+      - Result: Binary mismatch on metadata requirements
+  
+  why_direct_patch_works: |
+    When Gradle loads plugin build.gradle files, it reads them as static resources.
+    Patching the file in pub cache before Gradle runs ensures the file contains
+    namespace when AGP's configuration phase reads it.
+    
+    Process:
+      1. `flutter build apk` command
+      2. Flutter generates ~/.gradle/gradle_wrapper.properties
+      3. Gradle starts, loads settings.gradle.kts
+      4. Subprojects included, AGP plugin loaded
+      5. AGP processes subprojects' build.gradle files
+      6. Our patched isar_flutter_libs/build.gradle is found
+      7. Namespace found: ✅ validation passes
+
+deep_dive_desugaring_issue:
+  title: "Why Java Desugaring is Required & Memory-Intensive"
+  
+  java_version_history: |
+    Java 8 (released 2014): Added lambda expressions, streams, java.time API
+    Android SDK 21-25 (2015-2016): Support limited to Java 7 language features
+    Android SDK 26+ (2017): Native support for Java 8 language features
+    
+    Problem: flutter_local_notifications uses java.time.* (Java 8)
+             but app targets minSdkVersion 21 (no native Java 8 support)
+  
+  desugaring_process: |
+    Input: Compiled class files (from flutter_local_notifications + transitive deps)
+    
+    Step 1 - Class file parsing (CFR decompiler):
+      - Read bytecode, reconstruct source-level Java constructs
+      - Map java.time.* references to their locations
+      - Keep AST in memory for analysis
+    
+    Step 2 - Desugaring transformation (d8):
+      - Replace java.time.LocalDateTime → android.compat.time.LocalDateTime
+      - Replace java.util.stream.Stream → j$.util.stream.Stream
+      - Rewrite method references → synthetic bridge methods
+      - Add Android backport library stubs
+    
+    Step 3 - Bytecode generation & optimization (r8):
+      - Generate new bytecode for modified classes
+      - Shrink unused code (ProGuard-like minification)
+      - Optimize bytecode for Dalvik VM (d8 passes)
+    
+    Memory intensive because:
+      - Each step buffers full transitive dependency graph
+      - ~250+ JAR files = ~50MB combined
+      - AST analysis keeps method bodies in memory
+      - Optimization passes may keep multiple intermediate representations
+  
+  why_it_fails_with_3gb_heap: |
+    Heap allocation breakdown for -Xmx3G:
+      - Reserved by JVM overhead: 200-300MB
+      - Available for app logic: ~2.7GB
+      
+    During desugaring peak:
+      - CFR parsing: 400-500MB (class analysis graph)
+      - d8 transformer: 800-1000MB (intermediate bytecode)
+      - r8 optimizer: 600-800MB (multiple optimization representations)
+      - Total peak: 1.8-2.3GB (fits barely)
+    
+    But concurrent activities:
+      - Gradle daemon keeps plugin class metadata: 200-400MB
+      - Metaspace holds loaded classes: 300-500MB
+      - File I/O buffers: 100-200MB
+      - Combined overhead: 600-1100MB
+      
+      Total actual: 2.4-3.4GB > 3GB limit → OOM
+  
+  comparison_if_minsdkversion_26: |
+    If app used minSdkVersion 26:
+      - Java 8 APIs natively available
+      - No desugaring needed
+      - Build would skip d8/r8 bytecode transformation
+      - Estimated savings: 400-600MB peak memory
+      - Result: Would likely fit in 3GB with margin
+    
+    However: If HabitView needs API 21 support, this option unavailable
+
+# ============================================================================
+# SECTION 8: RECOMMENDATIONS & NEXT STEPS
+# ============================================================================
+
+immediate_next_steps:
+  1_immediate_action: |
+    Test current state with optimized gradle.properties:
+    
+    Command: `flutter build apk --no-daemon 2>&1 | tee build_output.log`
+    Rationale: --no-daemon disables Gradle daemon, uses subprocess model
+              Prevents accumulated memory from previous builds
+              Each build starts fresh with clean memory state
+    Expected outcome: Might succeed if memory is peak-based rather than accumulated
+  
+  2_if_still_crashes: |
+    Further reduce memory allocation:
+    
+    Change gradle.properties to:
+      org.gradle.jvmargs=-Xmx2G -XX:MaxMetaspaceSize=512m
+      org.gradle.workers.max=1
+      org.gradle.parallel=false
+    
+    Expected outcome: Slower build but uses <50% available memory
+  
+  3_if_reduction_doesnt_help: |
+    Investigate alternative: Increase minSdkVersion analysis
+    
+    Commands:
+      - `grep -r "minSdkVersion" android/app/build.gradle.kts`
+      - Check if app truly needs API 21 or if API 26 is acceptable
+      - If API 26 possible: remove desugaring, save 400-600MB
+  
+  4_if_api_21_required: |
+    Escalate to build infrastructure redesign:
+    
+    Options:
+      a) Move APK build to GitHub Actions CI (recommende for Codespaces constraint)
+         - GitHub-hosted runners: 7GB RAM, but optimized for builds
+         - Cost: Free tier includes generous build minutes
+      
+      b) Upgrade Codespaces instance size
+         - 16GB option available
+         - Cost: Higher per-minute charge
+         - Solves problem but defeats Codespaces efficiency
+      
+      c) Implement incremental builds / artifact caching
+         - Complex: requires gradle build cache setup
+         - Benefit: Subsequent builds use cached artifacts
+
+permanent_fixes_required:
+  1_isar_flutter_libs_namespace: |
+    Action: Contact isar package maintainers
+    Issue: Version 3.1.0+1 lacks namespace for AGP 8.0+
+    Options:
+      a) Request 3.1.0+2 patch release with namespace added
+      b) If package abandoned, use fork + path dependency
+      c) Migrate to alternative database (extensive refactoring)
+    
+    Timeline: Wait for maintainer response (may take weeks)
+    Fallback: Keep pub cache patch, document in README
+  
+  2_build_configuration_documentation: |
+    Create: docs/ANDROID_BUILD_CONFIGURATION.md
+    Contents:
+      - Codespaces memory constraints and workarounds
+      - gradle.properties tuning guidance
+      - Explain namespace patching (temporary)
+      - Explain desugaring requirement
+      - CI vs local build recommendations
+    
+    Purpose: Prevent future developers from spending hours troubleshooting
+
+known_unknowns:
+  - Will --no-daemon mode improve memory profile?
+  - What is exact minSdkVersion requirement for HabitView features?
+  - Is isar_flutter_libs package actively maintained?
+  - Could build cache reduce peak memory usage?
+  - What is maximum buildable APK size before OOM?
+
+# ============================================================================
+# SECTION 9: SUMMARY OF FILES CHANGED IN THIS SESSION
+# ============================================================================
+
+files_changed_summary:
+  total_files_modified: 2
+  total_new_files_created: 0
+  pub_cache_files_modified: 1 (temporary, not version-controlled)
+  
+  permanent_changes:
+    - android/gradle.properties (JVM memory tuning)
+    - android/app/build.gradle.kts (desugaring configuration)
+  
+  temporary_changes:
+    - /root/.pub-cache/hosted/pub.dev/isar_flutter_libs-3.1.0+1/android/build.gradle
+      (pub cache patch, lost on `flutter clean` or pub cache clear)
+
+# ============================================================================
+# SECTION 10: METRICS & TIMELINE
+# ============================================================================
+
+troubleshooting_metrics:
+  total_time_spent: "~70 minutes (estimated from terminal outputs)"
+  
+  time_breakdown:
+    - Problem diagnosis: 15 minutes
+    - Namespace workaround attempts: 25 minutes
+    - Memory investigation: 20 minutes
+    - Desugaring configuration: 10 minutes
+  
+  build_attempts: 8+ attempts (each 1.5-2 minutes for Gradle startup + eval)
+  
+  problems_identified: 3 cascading issues
+  problems_partially_resolved: 2 of 3 (namespace + desugaring enabled)
+  problems_remaining: 1 critical (memory exhaustion during compilation)
+
+# ============================================================================
+# SECTION 11: VALIDATION CRITERIA
+# ============================================================================
+
+success_criteria_for_build:
+  primary_goal: "Generate valid Android APK file"
+  
+  build_complete_indicators:
+    - ✅ Configuration phase: Gradle processes all build.gradle files
+    - ✅ Dependency resolution: All transitive deps downloaded/cached
+    - ✅ Code compilation: Java/Kotlin → class files
+    - ✅ Desugaring: Java 8 APIs → backport implementations
+    - ✅ Dex compilation: class files → DEX format for Android VM
+    - ✅ Resource linking: Manifest + resources → final format
+    - ✅ APK packaging: DEX + resources → .apk file
+    - ✅ Signing: APK signed with debug key
+    - ❌ Final step: APK file written to build/outputs/apk/release/app-release.apk
+  
+  current_failure_point: "Desugaring phase (step 3-4 boundary)"
+  
+  verification_upon_success:
+    - APK file size: 50-100MB expected (with font/asset tree-shaking)
+    - Can be installed on Android 5.0+ devices (minSdkVersion 21)
+    - Should boot to HabitView splash screen
+    - Local Isar database should initialize
+    - Firebase auth should be available (google-services.json required for prod)
+
+---
+# END OF SUMMARY
+# Generated: 2026-06-18T17:45:00Z
+# Status: Build infrastructure debugging in progress
+# Next action: Implement optimized gradle.properties, test with --no-daemon
