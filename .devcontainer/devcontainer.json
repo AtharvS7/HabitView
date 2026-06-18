@@ -1,0 +1,32 @@
+{
+  "name": "HabitView (Flutter + Dart)",
+  // Cirrus Labs publishes a maintained Flutter image with the Android SDK and
+  // command-line tools pre-installed. "stable" tracks the current stable channel,
+  // which satisfies this project's `flutter >=3.22` / Dart `^3.10.7` constraint.
+  "image": "ghcr.io/cirruslabs/flutter:stable",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "Dart-Code.dart-code",
+        "Dart-Code.flutter"
+      ],
+      "settings": {
+        "dart.flutterSdkPath": "/sdks/flutter",
+        "editor.formatOnSave": true,
+        "dart.lineLength": 80,
+        "[dart]": {
+          "editor.defaultFormatter": "Dart-Code.dart-code",
+          "editor.rulers": [80]
+        }
+      }
+    }
+  },
+  // Resolve deps and generate the Isar/freezed *.g.dart / *.freezed.dart parts.
+  // Nothing in lib/data/local/entities or lib/domain/models compiles until this
+  // runs, so it is the first gate on a fresh checkout.
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "remoteUser": "root"
+}
