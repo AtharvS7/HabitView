@@ -65,8 +65,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                 value: settings.cloudBackupEnabled,
                 onChanged: isPremium && !_busy
                     ? (v) => ref
-                        .read(settingsControllerProvider)
-                        .setCloudBackupEnabled(v)
+                          .read(settingsControllerProvider)
+                          .setCloudBackupEnabled(v)
                     : null,
               ),
               if (settings.cloudBackupEnabled) ...[
@@ -119,6 +119,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     await _guard(() async {
       final path = await _repo.exportToFile(uid);
       await Share.shareXFiles([XFile(path)], subject: 'HabitView backup');
+      return null;
     }, success: null);
   }
 
@@ -126,8 +127,9 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     final uid = _uid;
     if (uid == null) return;
     final result = await FilePicker.platform.pickFiles(type: FileType.any);
-    final path =
-        (result != null && result.files.isNotEmpty) ? result.files.first.path : null;
+    final path = (result != null && result.files.isNotEmpty)
+        ? result.files.first.path
+        : null;
     if (path == null) return;
     await _guard(() async {
       final json = await File(path).readAsString();
@@ -146,6 +148,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
       await ref
           .read(settingsControllerProvider)
           .setLastCloudBackupAt(DateTime.now());
+      return null;
     }, success: (_) => 'Backed up to cloud');
   }
 

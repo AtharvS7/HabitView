@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -30,8 +30,8 @@ final _shellKey = GlobalKey<NavigatorState>(debugLabel: 'shell');
 /// the router refreshes whenever either changes.
 final routerProvider = Provider<GoRouter>((ref) {
   final refresh = ValueNotifier<int>(0);
-  ref.listen(authStateProvider, (_, __) => refresh.value++);
-  ref.listen(settingsProvider, (_, __) => refresh.value++);
+  ref.listen(authStateProvider, (_, _) => refresh.value++);
+  ref.listen(settingsProvider, (_, _) => refresh.value++);
   ref.onDispose(refresh.dispose);
 
   return GoRouter(
@@ -48,7 +48,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       }
 
       final user = authState.valueOrNull;
-      final onAuthRoute = loc == AppRoutes.login ||
+      final onAuthRoute =
+          loc == AppRoutes.login ||
           loc == AppRoutes.register ||
           loc == AppRoutes.forgotPassword;
 
@@ -71,31 +72,25 @@ final routerProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
-      GoRoute(
-        path: AppRoutes.splash,
-        builder: (_, __) => const SplashScreen(),
-      ),
-      GoRoute(
-        path: AppRoutes.login,
-        builder: (_, __) => const LoginScreen(),
-      ),
+      GoRoute(path: AppRoutes.splash, builder: (_, _) => const SplashScreen()),
+      GoRoute(path: AppRoutes.login, builder: (_, _) => const LoginScreen()),
       GoRoute(
         path: AppRoutes.register,
-        builder: (_, __) => const RegisterScreen(),
+        builder: (_, _) => const RegisterScreen(),
       ),
       GoRoute(
         path: AppRoutes.forgotPassword,
-        builder: (_, __) => const ForgotPasswordScreen(),
+        builder: (_, _) => const ForgotPasswordScreen(),
       ),
       GoRoute(
         path: AppRoutes.onboarding,
-        builder: (_, __) => const OnboardingScreen(),
+        builder: (_, _) => const OnboardingScreen(),
       ),
       // Full-screen routes outside the bottom-nav shell.
       GoRoute(
         path: AppRoutes.habitCreate,
         parentNavigatorKey: _rootKey,
-        builder: (_, __) => const HabitCreateScreen(),
+        builder: (_, _) => const HabitCreateScreen(),
       ),
       GoRoute(
         path: '/habits/:id/edit',
@@ -112,26 +107,26 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: AppRoutes.account,
         parentNavigatorKey: _rootKey,
-        builder: (_, __) => const AccountScreen(),
+        builder: (_, _) => const AccountScreen(),
       ),
       GoRoute(
         path: AppRoutes.backup,
         parentNavigatorKey: _rootKey,
-        builder: (_, __) => const BackupScreen(),
+        builder: (_, _) => const BackupScreen(),
       ),
       GoRoute(
         path: AppRoutes.notifications,
         parentNavigatorKey: _rootKey,
-        builder: (_, __) => const NotificationSettingsScreen(),
+        builder: (_, _) => const NotificationSettingsScreen(),
       ),
       GoRoute(
         path: AppRoutes.premium,
         parentNavigatorKey: _rootKey,
-        builder: (_, __) => const PremiumScreen(),
+        builder: (_, _) => const PremiumScreen(),
       ),
       // Bottom-navigation shell.
       StatefulShellRoute.indexedStack(
-        builder: (_, __, navigationShell) =>
+        builder: (_, _, navigationShell) =>
             HomeShell(navigationShell: navigationShell),
         branches: [
           StatefulShellBranch(
@@ -139,28 +134,34 @@ final routerProvider = Provider<GoRouter>((ref) {
             routes: [
               GoRoute(
                 path: AppRoutes.today,
-                builder: (_, __) => const TodayScreen(),
+                builder: (_, _) => const TodayScreen(),
               ),
             ],
           ),
-          StatefulShellBranch(routes: [
-            GoRoute(
-              path: AppRoutes.dashboard,
-              builder: (_, __) => const DashboardScreen(),
-            ),
-          ]),
-          StatefulShellBranch(routes: [
-            GoRoute(
-              path: AppRoutes.insights,
-              builder: (_, __) => const InsightsScreen(),
-            ),
-          ]),
-          StatefulShellBranch(routes: [
-            GoRoute(
-              path: AppRoutes.settings,
-              builder: (_, __) => const SettingsScreen(),
-            ),
-          ]),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: AppRoutes.dashboard,
+                builder: (_, _) => const DashboardScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: AppRoutes.insights,
+                builder: (_, _) => const InsightsScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: AppRoutes.settings,
+                builder: (_, _) => const SettingsScreen(),
+              ),
+            ],
+          ),
         ],
       ),
     ],

@@ -5,7 +5,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/error/app_exception.dart';
 import '../../domain/models/app_settings.dart';
 import '../../domain/models/habit.dart';
-import '../services/premium_service.dart';
 import 'app_providers.dart';
 import 'auth_providers.dart';
 import 'premium_providers.dart';
@@ -32,8 +31,9 @@ final habitByIdProvider = FutureProvider.family<Habit?, String>(
   (ref, id) => ref.watch(habitRepositoryProvider).getHabit(id),
 );
 
-final habitControllerProvider =
-    AsyncNotifierProvider<HabitController, void>(HabitController.new);
+final habitControllerProvider = AsyncNotifierProvider<HabitController, void>(
+  HabitController.new,
+);
 
 class HabitController extends AsyncNotifier<void> {
   @override
@@ -58,27 +58,29 @@ class HabitController extends AsyncNotifier<void> {
       await _maybeScheduleReminder(created);
       return created;
     });
-    state = result.hasError ? AsyncError(result.error!, result.stackTrace!) : const AsyncData(null);
+    state = result.hasError
+        ? AsyncError(result.error!, result.stackTrace!)
+        : const AsyncData(null);
     return result.valueOrNull;
   }
 
-  Future<bool> update(Habit habit) => _run(() async {
-        await ref.read(habitRepositoryProvider).updateHabit(habit);
-        await _maybeScheduleReminder(habit);
-      });
+  Future<bool> updateHabit(Habit habit) => _run(() async {
+    await ref.read(habitRepositoryProvider).updateHabit(habit);
+    await _maybeScheduleReminder(habit);
+  });
 
   Future<bool> archive(String id) => _run(() async {
-        await ref.read(habitRepositoryProvider).archiveHabit(id);
-        await ref.read(notificationServiceProvider).cancelReminder(id);
-      });
+    await ref.read(habitRepositoryProvider).archiveHabit(id);
+    await ref.read(notificationServiceProvider).cancelReminder(id);
+  });
 
   Future<bool> restore(String id) =>
       _run(() => ref.read(habitRepositoryProvider).restoreHabit(id));
 
   Future<bool> delete(String id) => _run(() async {
-        await ref.read(habitRepositoryProvider).deleteHabit(id);
-        await ref.read(notificationServiceProvider).cancelReminder(id);
-      });
+    await ref.read(habitRepositoryProvider).deleteHabit(id);
+    await ref.read(notificationServiceProvider).cancelReminder(id);
+  });
 
   Future<void> _maybeScheduleReminder(Habit habit) async {
     final settings = ref.read(currentSettingsProvider);

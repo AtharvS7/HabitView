@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/analytics_service.dart';
+import 'app_providers.dart';
 import 'habit_log_providers.dart';
 import 'habit_providers.dart';
 import 'premium_providers.dart';
@@ -13,7 +14,9 @@ final dashboardStatsProvider = Provider<DashboardStats?>((ref) {
   if (habits == null || logsByHabit == null) return null;
 
   final windowDays = ref.watch(premiumServiceProvider).analyticsWindowDays;
-  return ref.watch(analyticsServiceProvider).build(
+  return ref
+      .watch(analyticsServiceProvider)
+      .build(
         habits: habits,
         logsByHabit: logsByHabit,
         // Cap the consistency window; the productivity window uses the full
@@ -23,8 +26,10 @@ final dashboardStatsProvider = Provider<DashboardStats?>((ref) {
 });
 
 /// Per-habit analytics keyed by habit id, for detail screens.
-final habitAnalyticsProvider =
-    Provider.family<HabitAnalytics?, String>((ref, habitId) {
+final habitAnalyticsProvider = Provider.family<HabitAnalytics?, String>((
+  ref,
+  habitId,
+) {
   final stats = ref.watch(dashboardStatsProvider);
   if (stats == null) return null;
   for (final h in stats.perHabit) {

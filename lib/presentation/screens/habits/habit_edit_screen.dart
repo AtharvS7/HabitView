@@ -63,21 +63,26 @@ class _HabitEditScreenState extends ConsumerState<HabitEditScreen> {
       trigger: data.trigger,
     );
 
-    final ok = await ref.read(habitControllerProvider.notifier).update(updated);
+    final ok = await ref
+        .read(habitControllerProvider.notifier)
+        .updateHabit(updated);
     if (!mounted) return;
     setState(() => _submitting = false);
 
     if (ok) {
       ref.invalidate(habitByIdProvider(widget.habitId));
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Habit updated')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Habit updated')));
       context.pop();
     } else {
       final error = ref.read(habitControllerProvider).error;
-      final message =
-          error is AppException ? error.message : 'Could not save changes.';
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message)));
+      final message = error is AppException
+          ? error.message
+          : 'Could not save changes.';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 }
