@@ -1,0 +1,93 @@
+rules_version = '2';
+
+// HabitView Firestore security rules.
+//
+// ARCHITECTURE NOTE (local-first): HabitView stores all primary data in a local
+// Isar database. Firebase is used for authentication and, optionally and
+// opt-in, for an ENCRYPTED CLOUD BACKUP that writes a SINGLE snapshot document
+// per user at `backups/{uid}` — never per-habit documents. The `backups` rule
+// below is the only collection the shipping app actually reads/writes at
+// runtime.
+//
+// The per-collection rules for `habits`, `habit_logs`, `insights` and
+// `user_progress` are retained for compatibility and for an optional future
+// server-side multi-device sync mode. They are harmless when unused: nothing in
+// the local-first client writes to them today.
+//
+// Model: every document is owned by exactly one user via a `userId` field
+// (except `user_progress`/`backups`, whose document id IS the uid). Clients may
+// only read and write their own data, and writes are schema-validated
+// server-side so the client cannot be trusted to send well-formed documents.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // A new/updated doc must be owned by the caller.
+    function ownsIncoming() {
+      return isSignedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    // An existing doc is owned by the caller.
+    function ownsExisting() {
+      return isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    function isString(v, maxLen) {
+      return v is string && v.size() > 0 && v.size() <= maxLen;
+    }
+
+    function inRange(v, lo, hi) {
+      return v is int && v >= lo && v <= hi;
+    }
+
+    match /habits/{habitId} {
+      allow read, delete: if ownsExisting();
+      allow create, update: if ownsIncoming()
+        && isString(request.resource.data.name, 80)
+        && inRange(request.resource.data.difficulty, 1, 5)
+        && request.resource.data.isActive is bool;
+    }
+
+    match /habit_logs/{logId} {
+      allow read, delete: if ownsExisting();
+      allow create, update: if ownsIncoming()
+        && isString(request.resource.data.date, 10)
+        && request.resource.data.status in ['done', 'skipped']
+        && (!('mood' in request.resource.data)
+            || request.resource.data.mood == null
+            || inRange(request.resource.data.mood, 1, 5))
+        && (!('notes' in request.resource.data)
+            || request.resource.data.notes == null
+            || request.resource.data.notes.size() <= 500);
+    }
+
+    // Insights are generated artefacts; treat the client as read-only and let
+    // a trusted backend (or the app, if it generates them locally) own writes.
+    match /insights/{insightId} {
+      allow read, delete: if ownsExisting();
+      allow create, update: if ownsIncoming();
+    }
+
+    // One progress document per user, keyed by uid.
+    match /user_progress/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Encrypted cloud backup: a single snapshot document per user, keyed by uid.
+    // This is the only collection the local-first app reads/writes at runtime,
+    // and only when the user has opted into cloud backup. The payload is an
+    // opaque (optionally AES-encrypted) blob, so we authorise by ownership only
+    // rather than schema-validating its contents.
+    match /backups/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Deny everything not explicitly matched above.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
