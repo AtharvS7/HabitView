@@ -13,6 +13,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        
+        // Enable core library desugaring for Java 8+ APIs on older Android versions
+        // Required by flutter_local_notifications
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -28,6 +32,10 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        
+        // Enable core library desugaring for dependencies like flutter_local_notifications
+        // that require Java 8+ APIs on older Android versions
+        multiDexEnabled = true
     }
 
     buildTypes {
@@ -37,6 +45,19 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+}
+
+dependencies {
+    // Workaround for library plugins (like isar_flutter_libs) that don't declare namespace
+    // Required for AGP 8.0+ compatibility
+    
+    // Core library desugaring for Java 11 API support on older Android versions
+    // Required by flutter_local_notifications and other modern dependencies
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+}
+
+flutter {
+    source = "../.."
 }
 
 flutter {
